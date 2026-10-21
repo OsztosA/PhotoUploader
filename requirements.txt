@@ -1,0 +1,4 @@
+requests>=2.31
+Pillow>=10.0
+google-auth>=2.25
+google-auth-oauthlib>=1.2
