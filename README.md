@@ -1,5 +1,8 @@
 # Photo Uploader (Google Photos)
 
+<img src="images/banner.jpg" alt="PhotoAssist - AI-Powered Photo Organizer" width="100%">
+
+
 Tkinter GUI that uploads local photos to Google Photos, one album per month by EXIF date
 (e.g. `2018. January`), resumable across sessions.
 
