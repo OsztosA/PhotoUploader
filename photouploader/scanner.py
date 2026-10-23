@@ -51,11 +51,14 @@ def exif_datetime(path):
 def scan_folder(folder, db, progress=None, cancelled=lambda: False):
     """Walk folder recursively and record files in the DB. Returns count of new/changed files."""
     batch, count = [], 0
-    for root, _dirs, names in os.walk(folder):
+    for root, dirs, names in os.walk(folder):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]  # skip hidden folders
         for name in names:
             if cancelled():
                 db.upsert_scanned(batch)
                 return count
+            if name.startswith("."):
+                continue
             ext = os.path.splitext(name)[1].lower()
             is_video = ext in VIDEO_EXT
             if ext not in IMAGE_EXT and not is_video:
