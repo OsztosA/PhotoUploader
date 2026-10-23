@@ -1,11 +1,11 @@
-"""Upload engine: per album -> upload bytes in parallel -> batchCreate (<=50) into the album.
+"""Upload engine: share a worker pool across albums and batchCreate (<=50) per album.
 Pausable / resumable; all state lives in the DB so a restart continues where it stopped."""
 import csv
 import os
 import threading
 import time
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 from .api import ApiError, BATCH_LIMIT
@@ -28,6 +28,14 @@ class Stats:
             self._samples.append((now, self.bytes_done))
             while self._samples and now - self._samples[0][0] > 15:
                 self._samples.popleft()
+
+    def add_files_done(self):
+        with self._lock:
+            self.files_done += 1
+
+    def add_files_failed(self):
+        with self._lock:
+            self.files_failed += 1
 
     def speed(self):
         with self._lock:
@@ -75,6 +83,9 @@ class UploadEngine:
         self.current_album = ""
         self._files_lock = threading.Lock()
         self._file_progress = {}
+        self._share_lock = threading.Lock()
+        self._log_lock = threading.Lock()
+        self._commit_lock = threading.Lock()
 
     def file_progress(self):
         with self._files_lock:
@@ -112,10 +123,19 @@ class UploadEngine:
     def _run(self, keys):
         try:
             self._prepare(keys)
-            for key in keys:
-                if self._stop.is_set():
-                    break
-                self._do_album(key)
+            first_error = None
+            with ThreadPoolExecutor(max_workers=self.workers) as upload_pool:
+                with ThreadPoolExecutor(max_workers=self.workers) as album_pool:
+                    futures = [album_pool.submit(self._do_album, key, upload_pool) for key in keys]
+                    for future in as_completed(futures):
+                        try:
+                            future.result()
+                        except Exception as e:  # noqa: BLE001
+                            self._stop.set()
+                            if first_error is None:
+                                first_error = e
+            if first_error is not None:
+                raise first_error
             self._emit("finished", stopped=self._stop.is_set())
         except ApiError as e:
             self._emit("error", message=str(e))
@@ -129,7 +149,9 @@ class UploadEngine:
             f"WHERE album_key IN ({marks}) AND status!='done'", keys)[0]
         self.stats = Stats(row["n"], row["b"])
 
-    def _do_album(self, key):
+    def _do_album(self, key, pool):
+        if self._stop.is_set():
+            return
         title = self.db.query("SELECT title FROM albums WHERE key=?", (key,))[0]["title"]
         pending = self.db.pending_files(key)
         if not pending:
@@ -141,38 +163,38 @@ class UploadEngine:
         if not album_id:
             album_id = self.api.create_album(title)
             self.db.set_album(key, album_id)
-        if self.share and not album["share_url"]:
-            try:
-                self.db.set_share(key, self.api.share_album(album_id))
-                self._emit("shared", title=title)
-            except ApiError as e:
-                # sharing scope was discontinued by Google; keep uploading without a link
-                self._emit("log", message=f"Share link creation failed for {title}: {e}")
-                self.share = False
+        with self._share_lock:
+            if self.share and not album["share_url"]:
+                try:
+                    self.db.set_share(key, self.api.share_album(album_id))
+                    self._emit("shared", title=title)
+                except ApiError as e:
+                    # sharing scope was discontinued by Google; keep uploading without a link
+                    self._emit("log", message=f"Share link creation failed for {title}: {e}")
+                    self.share = False
 
-        with ThreadPoolExecutor(self.workers) as pool:
-            for i in range(0, len(pending), BATCH_LIMIT):
-                if not self._wait_if_paused():
-                    return
-                chunk = pending[i:i + BATCH_LIMIT]
-                ready = []
-                todo = []
-                for f in chunk:
-                    fresh = f["status"] == "uploaded" and f["upload_token"] and \
-                        time.time() - (f["updated"] or 0) < TOKEN_MAX_AGE
-                    if fresh:
-                        ready.append(f)
-                        self.stats.add_bytes(f["size"])
-                    else:
-                        todo.append(f)
-                for f, token in zip(todo, pool.map(self._upload_one, todo)):
-                    if token:
-                        ready.append({**dict(f), "upload_token": token})
-                if ready:
-                    self._commit(album_id, ready)
-                self._emit("progress")
-                if self._stop.is_set():
-                    return
+        for i in range(0, len(pending), BATCH_LIMIT):
+            if not self._wait_if_paused():
+                return
+            chunk = pending[i:i + BATCH_LIMIT]
+            ready = []
+            todo = []
+            for f in chunk:
+                fresh = f["status"] == "uploaded" and f["upload_token"] and \
+                    time.time() - (f["updated"] or 0) < TOKEN_MAX_AGE
+                if fresh:
+                    ready.append(f)
+                    self.stats.add_bytes(f["size"])
+                else:
+                    todo.append(f)
+            for f, token in zip(todo, pool.map(self._upload_one, todo)):
+                if token:
+                    ready.append({**dict(f), "upload_token": token})
+            if ready:
+                self._commit(album_id, title, ready)
+            self._emit("progress")
+            if self._stop.is_set():
+                return
 
     def _upload_one(self, f):
         if not self._wait_if_paused():
@@ -194,7 +216,7 @@ class UploadEngine:
             if isinstance(e, ApiError) and e.fatal:
                 self._stop.set()
             self.db.mark(path, "failed", error=str(e))
-            self.stats.files_failed += 1
+            self.stats.add_files_failed()
             self._emit("log", message=f"Upload failed for {path}: {type(e).__name__}: {e}")
             return None
         finally:
@@ -203,7 +225,11 @@ class UploadEngine:
         self.db.mark(path, "uploaded", token=token)
         return token
 
-    def _commit(self, album_id, files):
+    def _commit(self, album_id, album_title, files):
+        with self._commit_lock:
+            self._commit_locked(album_id, album_title, files)
+
+    def _commit_locked(self, album_id, album_title, files):
         by_token = {f["upload_token"]: f for f in files}
         items = [(f["upload_token"], os.path.basename(f["path"])) for f in files]
         try:
@@ -218,25 +244,26 @@ class UploadEngine:
         for token, f in by_token.items():
             ok, info = results.get(token, (False, "no result"))
             if ok:
-                self._log_uploaded_file(f, album_id, info)
+                self._log_uploaded_file(f, album_title, album_id, info)
                 self.db.mark(f["path"], "done", media_id=info)
-                self.stats.files_done += 1
+                self.stats.add_files_done()
             else:
                 self.db.mark(f["path"], "failed", error=info)  # token unusable -> re-upload next time
-                self.stats.files_failed += 1
+                self.stats.add_files_failed()
                 self._emit("log", message=f"Adding {f['path']} to album failed: {info}")
 
-    def _log_uploaded_file(self, file, album_id, media_item_id):
+    def _log_uploaded_file(self, file, album_title, album_id, media_item_id):
         fields = ("uploaded_at", "source_path", "album_title", "album_id", "media_item_id")
-        needs_header = not os.path.exists(self.upload_log_path) or os.path.getsize(self.upload_log_path) == 0
-        with open(self.upload_log_path, "a", newline="", encoding="utf-8") as log:
-            writer = csv.DictWriter(log, fieldnames=fields)
-            if needs_header:
-                writer.writeheader()
-            writer.writerow({
-                "uploaded_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-                "source_path": file["path"],
-                "album_title": self.current_album,
-                "album_id": album_id,
-                "media_item_id": media_item_id,
-            })
+        with self._log_lock:
+            needs_header = not os.path.exists(self.upload_log_path) or os.path.getsize(self.upload_log_path) == 0
+            with open(self.upload_log_path, "a", newline="", encoding="utf-8") as log:
+                writer = csv.DictWriter(log, fieldnames=fields)
+                if needs_header:
+                    writer.writeheader()
+                writer.writerow({
+                    "uploaded_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                    "source_path": file["path"],
+                    "album_title": album_title,
+                    "album_id": album_id,
+                    "media_item_id": media_item_id,
+                })

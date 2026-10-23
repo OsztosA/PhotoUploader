@@ -1,4 +1,4 @@
-import csv, os, tempfile, time
+import csv, os, tempfile, threading, time
 from PIL import Image
 from photouploader.db import Database
 from photouploader.scanner import scan_folder
@@ -85,8 +85,53 @@ def test_upload_failure_is_logged():
     ), events
 
 
+def test_albums_share_upload_workers():
+    d = tempfile.mkdtemp()
+    rows = []
+    for key in ("2018-01", "2019-01"):
+        path = os.path.join(d, key + ".jpg")
+        with open(path, "wb") as f:
+            f.write(b"photo")
+        rows.append((path, 5, time.time(), key + "-05", key, key))
+    db = Database(os.path.join(d, "t.db"))
+    db.upsert_scanned(rows)
+
+    class ConcurrentApi(FakeApi):
+        def __init__(self):
+            super().__init__()
+            self.active = 0
+            self.lock = threading.Lock()
+            self.both_uploading = threading.Event()
+
+        def upload_bytes(self, p, on_bytes=None):
+            with self.lock:
+                self.active += 1
+                if self.active == 2:
+                    self.both_uploading.set()
+            self.both_uploading.wait(3)
+            if on_bytes:
+                on_bytes(os.path.getsize(p))
+            with self.lock:
+                self.active -= 1
+            return "tok-" + p
+
+    api = ConcurrentApi()
+    events = []
+    eng = UploadEngine(db, api, events.append, workers=2, share=False)
+    eng.start([row[4] for row in rows])
+    eng._thread.join(5)
+    assert not eng.active, "upload engine did not finish"
+    assert api.both_uploading.is_set(), "albums did not use both upload workers concurrently"
+    assert db.query("SELECT COUNT(*) c FROM files WHERE status='done'")[0]["c"] == 2
+    with open(os.path.join(d, "uploaded_files.csv"), newline="", encoding="utf-8") as f:
+        uploaded = {row["source_path"]: row["album_title"] for row in csv.DictReader(f)}
+    assert uploaded == {row[0]: row[4] for row in rows}, uploaded
+    assert not [e for e in events if e["kind"] == "error"], events
+
+
 test_flow()
 test_upload_failure_is_logged()
+test_albums_share_upload_workers()
 
 
 def test_throttle_limits_speed():
