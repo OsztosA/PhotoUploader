@@ -14,6 +14,15 @@ Tkinter GUI that uploads local photos to Google Photos, one album per month by E
    and save it as `data\client_secret.json`.
 3. Run `.venv\Scripts\python main.py`, click **Sign in**.
 
+## OAuth 2.0 credentials
+This app uses Google OAuth 2.0 to access Google Photos. The developer does not provide an API key or
+OAuth credentials: each user must create their own Google Cloud project and Desktop app OAuth client, then
+download its credentials JSON as described in Setup. Keep `data\client_secret.json` private and do not
+share or commit it. See Google's
+[Photos API getting started guide](https://developers.google.com/photos/library/guides/get-started),
+[OAuth 2.0 setup documentation](https://developers.google.com/identity/protocols/oauth2),
+and the [Google Cloud Console](https://console.cloud.google.com/).
+
 ## Build (Windows)
 1. Install dependencies with `.venv\Scripts\pip install -r requirements-build.txt`.
 2. Run `build.bat` from the repository root (or `powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1`).
@@ -47,6 +56,9 @@ so use **Export share links** (clipboard + `data\shared_albums.txt`) and send th
 album row to open its link.
 
 ## Notes
+- Use this software at your own risk. The developer provides it without guarantees and is not responsible
+  for data loss, damaged files, or other consequences of its use. Always make and verify a separate backup
+  of your pictures before scanning or uploading; do not rely on this app or Google Photos as your only copy.
 - Since 2025 the API only lets an app see/modify what it uploaded; duplicates are not detected across
   apps, but the local DB prevents re-uploading the same unchanged file.
 - Images (jpg, png, gif, bmp, tif, webp, heic) and videos (mp4, mov, m4v, avi, mkv, 3gp, mpg, wmv, mts, webm).
