@@ -91,8 +91,12 @@ class App(tk.Tk):
         self.rescan_btn = ttk.Button(fol, text="Rescan unprocessed", command=lambda: self.scan(rescan=True))
         self.rescan_btn.pack(side="left", padx=(0, 8))
 
-        alb = ttk.LabelFrame(self, text="3. Albums (one per month, by EXIF date) - select albums to upload, none = all")
-        alb.pack(fill="both", expand=True, **pad)
+        paned = ttk.PanedWindow(self, orient="vertical")
+        paned.pack(fill="both", expand=True)
+        alb = ttk.LabelFrame(paned, text="3. Albums (one per month, by EXIF date) - select albums to upload, none = all")
+        paned.add(alb, weight=1)
+        lower = ttk.Frame(paned)
+        paned.add(lower, weight=0)
         cols = ("files", "done", "failed", "size", "left", "shared")
         self.tree = ttk.Treeview(alb, columns=cols, show="tree headings", selectmode="extended", height=8)
         self.tree.tag_configure("uploading", background="#fff2cc", foreground="#7a4b00")
@@ -109,7 +113,7 @@ class App(tk.Tk):
         sb.pack(side="left", fill="y")
         self.tree.bind("<Double-1>", self._open_share)
 
-        ctl = ttk.LabelFrame(self, text="4. Upload")
+        ctl = ttk.LabelFrame(lower, text="4. Upload")
         ctl.pack(fill="x", **pad)
         ttk.Label(ctl, text="Parallel uploads:").pack(side="left", padx=(8, 2))
         self.workers = tk.IntVar(value=self._load_settings().get("workers", 4))
@@ -130,7 +134,7 @@ class App(tk.Tk):
         self.start_btn = ttk.Button(ctl, text="Start / Resume", command=self.start)
         self.start_btn.pack(side="right")
 
-        bottom = ttk.Frame(self)
+        bottom = ttk.Frame(lower)
         bottom.pack(fill="both", expand=True, **pad)
 
         status = ttk.LabelFrame(bottom, text="Status")
@@ -149,7 +153,7 @@ class App(tk.Tk):
         ttk.Style().configure("Small.Horizontal.TProgressbar", thickness=6)
         self.small_font = ("TkDefaultFont", 7)
 
-        self.log = tk.Text(log_panel, height=8, state="disabled", wrap="word")
+        self.log = tk.Text(log_panel, height=4, state="disabled", wrap="word")
         log_scroll = ttk.Scrollbar(log_panel, command=self.log.yview)
         self.log.configure(yscrollcommand=log_scroll.set)
         self.log.pack(side="left", fill="both", expand=True, padx=(8, 0), pady=6)
