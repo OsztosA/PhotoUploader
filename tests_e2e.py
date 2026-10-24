@@ -109,6 +109,30 @@ def test_batch_create_failure_is_logged():
     assert "album rejected item" in contents
 
 
+def test_batch_create_success_is_logged():
+    d = tempfile.mkdtemp()
+    path = os.path.join(d, "photo.jpg")
+    with open(path, "wb") as f:
+        f.write(b"photo")
+    db = Database(os.path.join(d, "t.db"))
+    db.upsert_scanned([(path, 5, time.time(), "2018-01-05", "2018-01", "2018. January")])
+
+    events = []
+    eng = UploadEngine(db, FakeApi(), events.append, share=False)
+    eng._prepare(["2018-01"])
+    eng._commit(
+        "id-2018. January",
+        "2018. January",
+        [{"path": path, "upload_token": "token"}],
+    )
+
+    assert any(
+        event["kind"] == "info"
+        and event["message"] == "Batch create completed for 2018. January: 1/1 file(s) added."
+        for event in events
+    ), events
+
+
 def test_resume_retries_failed_first_or_skips_them():
     def setup():
         d = tempfile.mkdtemp()
@@ -195,6 +219,7 @@ def test_albums_share_upload_workers():
 test_flow()
 test_upload_failure_is_logged()
 test_batch_create_failure_is_logged()
+test_batch_create_success_is_logged()
 test_resume_retries_failed_first_or_skips_them()
 test_albums_share_upload_workers()
 

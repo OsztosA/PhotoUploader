@@ -265,9 +265,11 @@ class UploadEngine:
             for f in files:  # keep the upload token, retried on next run
                 self.db.mark(f["path"], "uploaded", token=f["upload_token"], error=str(e))
             return
+        committed = 0
         for token, f in by_token.items():
             ok, info = results.get(token, (False, "no result"))
             if ok:
+                committed += 1
                 self._log_uploaded_file(f, album_title, album_id, info)
                 self.db.mark(f["path"], "done", media_id=info)
                 self.stats.add_files_done()
@@ -275,6 +277,11 @@ class UploadEngine:
                 self.db.mark(f["path"], "failed", error=info)  # token unusable -> re-upload next time
                 self.stats.add_files_failed()
                 self._emit("log", message=f"Adding {f['path']} to album failed: {info}")
+        self._emit(
+            "info",
+            message=f"Batch create completed for {album_title}: "
+                    f"{committed}/{len(files)} file(s) added.",
+        )
 
     def _log_uploaded_file(self, file, album_title, album_id, media_item_id):
         fields = ("uploaded_at", "source_path", "album_title", "album_id", "media_item_id")

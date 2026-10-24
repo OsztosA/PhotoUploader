@@ -317,7 +317,7 @@ class App(tk.Tk):
             while True:
                 ev = self.events.get_nowait()
                 k = ev["kind"]
-                if k == "log":
+                if k in ("log", "info"):
                     self.log_msg(ev["message"])
                 elif k == "auth":
                     self.update_auth_state()
