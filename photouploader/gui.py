@@ -34,6 +34,122 @@ def fmt_size(n):
         n /= 1024
 
 
+class AlbumGrid(ttk.Frame):
+    """Albums laid out in several side-by-side tables, each at most MAX_COL_WIDTH wide."""
+    MAX_COL_WIDTH = 420
+    COLS = (("files", "Files", 50), ("done", "Done", 50), ("failed", "Failed", 50),
+            ("left", "Left", 55), ("size", "Size", 70), ("shared", "Link", 35))
+
+    def __init__(self, master, on_open):
+        super().__init__(master)
+        self.on_open = on_open
+        self.trees = []
+        self.rows = []
+        self.share_urls = {}
+        self._selected = set()
+        self._syncing = False
+        self._after = None
+        self._ncols = 0
+        self.sb = ttk.Scrollbar(self, command=self._yview)
+        self.sb.pack(side="right", fill="y")
+        self.body = ttk.Frame(self)
+        self.body.pack(side="left", fill="both", expand=True)
+        self.body.bind("<Configure>", self._on_resize)
+
+    def _yview(self, *args):
+        for t in self.trees:
+            t.yview(*args)
+
+    def _on_scroll(self, first, last):
+        self.sb.set(first, last)
+        if self._syncing:
+            return
+        self._syncing = True
+        for t in self.trees:
+            t.yview_moveto(first)
+        self._syncing = False
+
+    def _make_tree(self):
+        t = ttk.Treeview(self.body, columns=[c[0] for c in self.COLS], show="tree headings",
+                         selectmode="extended", height=8)
+        t.tag_configure("uploading", background="#fff2cc", foreground="#7a4b00")
+        t.tag_configure("committing", background="#d9eaf7", foreground="#164a6e")
+        t.heading("#0", text="Album")
+        t.column("#0", width=95, minwidth=60)
+        for c, title, w in self.COLS:
+            t.heading(c, text=title)
+            t.column(c, width=w, minwidth=30, anchor="e" if c != "shared" else "center")
+        t.configure(yscrollcommand=self._on_scroll)
+        t.bind("<Button-1>", lambda e, t=t: self._on_click(e, t), add="+")
+        t.bind("<<TreeviewSelect>>", lambda e: self._remember_selection(), add="+")
+        t.bind("<Double-1>", lambda e, t=t: self._on_double(t))
+        return t
+
+    def _on_click(self, event, tree):
+        if not event.state & 0x5:  # no Shift/Control: plain click replaces selection in other tables
+            for t in self.trees:
+                if t is not tree and t.selection():
+                    t.selection_set(())
+
+    def _on_double(self, tree):
+        item = tree.focus()
+        if item:
+            self.on_open(item)
+
+    def _remember_selection(self):
+        self._selected = {i for t in self.trees for i in t.selection()}
+
+    def _on_resize(self, _e):
+        if self._after:
+            self.after_cancel(self._after)
+        self._after = self.after(100, self._relayout)
+
+    def _relayout(self):
+        self._after = None
+        if self._column_count() != self._ncols:
+            self._rebuild()
+
+    def _column_count(self):
+        width = max(self.body.winfo_width(), 1)
+        return max(1, min(-(-width // self.MAX_COL_WIDTH), len(self.rows) or 1))
+
+    def set_rows(self, rows, share_urls):
+        """rows: dicts with iid, text, values (without link column) and tags."""
+        self.rows = rows
+        self.share_urls = share_urls
+        self._rebuild()
+
+    def _rebuild(self):
+        pos = self.sb.get()[0]
+        selected = set(self._selected)
+        self._ncols = self._column_count()
+        per = -(-len(self.rows) // self._ncols) if self.rows else 0
+        for t in self.trees:
+            t.destroy()
+        self.trees = [self._make_tree() for _ in range(self._ncols)]
+        for i, t in enumerate(self.trees):
+            t.pack(side="left", fill="both", expand=True)
+            for r in self.rows[i * per:(i + 1) * per]:
+                link = "✓" if self.share_urls.get(r["iid"]) else ""
+                t.insert("", "end", iid=r["iid"], text=r["text"], values=(*r["values"], link), tags=r["tags"])
+            keep = [k for k in selected if t.exists(k)]
+            if keep:
+                t.selection_set(keep)
+        self._selected = selected
+        self.update_idletasks()
+        self._on_scroll(pos, 1)
+
+    def selection(self):
+        return tuple(i for t in self.trees for i in t.selection())
+
+    def exists(self, iid):
+        return any(t.exists(iid) for t in self.trees)
+
+    def selection_set(self, keys):
+        for t in self.trees:
+            t.selection_set([k for k in keys if t.exists(k)])
+
+
 def fmt_time(sec):
     if sec is None:
         return "--"
@@ -97,21 +213,8 @@ class App(tk.Tk):
         paned.add(alb, weight=1)
         lower = ttk.Frame(paned)
         paned.add(lower, weight=0)
-        cols = ("files", "done", "failed", "size", "left", "shared")
-        self.tree = ttk.Treeview(alb, columns=cols, show="tree headings", selectmode="extended", height=8)
-        self.tree.tag_configure("uploading", background="#fff2cc", foreground="#7a4b00")
-        self.tree.tag_configure("committing", background="#d9eaf7", foreground="#164a6e")
-        self.tree.heading("#0", text="Album")
-        self.tree.column("#0", width=160)
-        for c, t, w in (("files", "Files", 70), ("done", "Uploaded", 80), ("failed", "Failed", 70),
-                        ("size", "Size", 90), ("left", "Remaining", 90), ("shared", "Share link", 300)):
-            self.tree.heading(c, text=t)
-            self.tree.column(c, width=w, anchor="w" if c == "shared" else "e")
-        sb = ttk.Scrollbar(alb, command=self.tree.yview)
-        self.tree.configure(yscrollcommand=sb.set)
-        self.tree.pack(side="left", fill="both", expand=True)
-        sb.pack(side="left", fill="y")
-        self.tree.bind("<Double-1>", self._open_share)
+        self.tree = AlbumGrid(alb, self._open_share)
+        self.tree.pack(fill="both", expand=True)
 
         ctl = ttk.LabelFrame(lower, text="4. Upload")
         ctl.pack(fill="x", **pad)
@@ -259,24 +362,21 @@ class App(tk.Tk):
         threading.Thread(target=work, daemon=True).start()
 
     def refresh_albums(self):
-        sel = set(self.tree.selection())
-        self.tree.delete(*self.tree.get_children())
+        rows, urls = [], {}
         for r in self.db.album_summary():
             done, failed = r["done"] or 0, r["failed"] or 0
-            self.tree.insert("", "end", iid=r["key"], text=r["title"], values=(
-                r["total"], done, failed, fmt_size(r["bytes"]), r["total"] - done, r["share_url"] or ""),
-                tags=("committing",) if r["key"] in self.committing_albums else
-                     ("uploading",) if r["key"] in self.uploading_albums else ())
-        keep = [k for k in sel if self.tree.exists(k)]
-        if keep:
-            self.tree.selection_set(keep)
+            urls[r["key"]] = r["share_url"]
+            rows.append({
+                "iid": r["key"], "text": r["title"],
+                "values": (r["total"], done, failed, r["total"] - done, fmt_size(r["bytes"])),
+                "tags": ("committing",) if r["key"] in self.committing_albums else
+                        ("uploading",) if r["key"] in self.uploading_albums else ()})
+        self.tree.set_rows(rows, urls)
 
-    def _open_share(self, _e):
-        item = self.tree.focus()
-        if item:
-            url = self.tree.set(item, "shared")
-            if url:
-                webbrowser.open(url)
+    def _open_share(self, item):
+        url = self.tree.share_urls.get(item)
+        if url:
+            webbrowser.open(url)
 
     def export_links(self):
         rows = [r for r in self.db.album_summary() if r["share_url"]]
