@@ -77,7 +77,14 @@ class Database:
     def set_share(self, key, url):
         self.execute("UPDATE albums SET share_url=? WHERE key=?", (url, key))
 
-    def pending_files(self, key):
+    def pending_files(self, key, status=None):
+        if status == "failed":
+            return self.query(
+                "SELECT * FROM files WHERE album_key=? AND status='failed' ORDER BY taken, path", (key,))
+        if status == "pending":
+            return self.query(
+                "SELECT * FROM files WHERE album_key=? AND status IN ('new','uploaded') "
+                "ORDER BY taken, path", (key,))
         return self.query(
             "SELECT * FROM files WHERE album_key=? AND status IN ('new','uploaded','failed') "
             "ORDER BY taken, path", (key,))

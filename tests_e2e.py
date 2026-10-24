@@ -85,6 +85,45 @@ def test_upload_failure_is_logged():
     ), events
 
 
+def test_resume_retries_failed_first_or_skips_them():
+    def setup():
+        d = tempfile.mkdtemp()
+        rows = []
+        for name in ("failed.jpg", "new.jpg"):
+            path = os.path.join(d, name)
+            with open(path, "wb") as f:
+                f.write(b"photo")
+            rows.append((path, 5, time.time(), "2020-01-01", "2020-01", "2020. January"))
+        db = Database(os.path.join(d, "t.db"))
+        db.upsert_scanned(rows)
+        db.mark(rows[0][0], "failed", error="previous failure")
+        return db
+
+    class TrackingApi(FakeApi):
+        def __init__(self):
+            super().__init__()
+            self.uploaded = []
+
+        def upload_bytes(self, path, on_bytes=None):
+            self.uploaded.append(os.path.basename(path))
+            return super().upload_bytes(path, on_bytes)
+
+    api = TrackingApi()
+    db = setup()
+    engine = UploadEngine(db, api, lambda _: None, workers=1, share=False)
+    engine.start(["2020-01"], retry_failed_first=True)
+    engine._thread.join(10)
+    assert api.uploaded == ["failed.jpg", "new.jpg"], api.uploaded
+
+    api = TrackingApi()
+    db = setup()
+    engine = UploadEngine(db, api, lambda _: None, workers=1, share=False)
+    engine.start(["2020-01"], retry_failed_first=False)
+    engine._thread.join(10)
+    assert api.uploaded == ["new.jpg"], api.uploaded
+    assert db.query("SELECT status FROM files WHERE path LIKE '%failed.jpg'")[0]["status"] == "failed"
+
+
 def test_albums_share_upload_workers():
     d = tempfile.mkdtemp()
     rows = []
@@ -131,6 +170,7 @@ def test_albums_share_upload_workers():
 
 test_flow()
 test_upload_failure_is_logged()
+test_resume_retries_failed_first_or_skips_them()
 test_albums_share_upload_workers()
 
 

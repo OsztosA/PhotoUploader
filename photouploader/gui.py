@@ -269,14 +269,26 @@ class App(tk.Tk):
         if not self.auth.is_signed_in():
             messagebox.showwarning("Sign in", "Please sign in to Google first.")
             return
-        keys = list(self.tree.selection()) or [r["key"] for r in self.db.album_summary()]
-        keys = [r["key"] for r in self.db.album_summary() if r["key"] in keys and r["total"] - (r["done"] or 0) > 0]
+        selected = set(self.tree.selection())
+        rows = [r for r in self.db.album_summary()
+                if (not selected or r["key"] in selected) and r["total"] - (r["done"] or 0) > 0]
+        rows.sort(key=lambda r: (not bool(r["done"]), r["key"]))
+        keys = [r["key"] for r in rows]
         if not keys:
             messagebox.showinfo("Nothing to do", "No pending files. Browse a folder and scan first.")
             return
+        marks = ",".join("?" * len(keys))
+        failed = self.db.query(
+            f"SELECT COUNT(*) n FROM files WHERE album_key IN ({marks}) AND status='failed'", keys)[0]["n"]
+        retry_failed_first = False
+        if failed:
+            retry_failed_first = messagebox.askyesno(
+                "Retry failed uploads",
+                f"There are {failed} failed upload(s). Retry them first?\n\n"
+                "Choosing No skips failed uploads for this run.")
         self.engine = UploadEngine(self.db, self.api, self.events.put, workers=self.workers.get(),
                                    share=self.share.get())
-        self.engine.start(keys)
+        self.engine.start(keys, retry_failed_first=retry_failed_first)
         self.start_btn.config(state="disabled")
         self.pause_btn.config(state="normal", text="Pause")
         self.stop_btn.config(state="normal")

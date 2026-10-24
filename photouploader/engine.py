@@ -95,10 +95,11 @@ class UploadEngine:
     def active(self):
         return self._thread is not None and self._thread.is_alive()
 
-    def start(self, album_keys):
+    def start(self, album_keys, retry_failed_first=None):
         self._stop.clear()
         self._running.set()
-        self._thread = threading.Thread(target=self._run, args=(list(album_keys),), daemon=True)
+        self._thread = threading.Thread(
+            target=self._run, args=(list(album_keys), retry_failed_first), daemon=True)
         self._thread.start()
 
     def pause(self):
@@ -120,20 +121,29 @@ class UploadEngine:
         self._running.wait()
         return not self._stop.is_set()
 
-    def _run(self, keys):
+    def _run(self, keys, retry_failed_first=None):
         try:
-            self._prepare(keys)
+            self._prepare(keys, retry_failed_first)
             first_error = None
             with ThreadPoolExecutor(max_workers=self.workers) as upload_pool:
                 with ThreadPoolExecutor(max_workers=self.workers) as album_pool:
-                    futures = [album_pool.submit(self._do_album, key, upload_pool) for key in keys]
-                    for future in as_completed(futures):
-                        try:
-                            future.result()
-                        except Exception as e:  # noqa: BLE001
-                            self._stop.set()
-                            if first_error is None:
-                                first_error = e
+                    if retry_failed_first is True:
+                        modes = ("failed", "pending")
+                    elif retry_failed_first is False:
+                        modes = ("pending",)
+                    else:
+                        modes = (None,)
+                    for mode in modes:
+                        if self._stop.is_set():
+                            break
+                        futures = [album_pool.submit(self._do_album, key, upload_pool, mode) for key in keys]
+                        for future in as_completed(futures):
+                            try:
+                                future.result()
+                            except Exception as e:  # noqa: BLE001
+                                self._stop.set()
+                                if first_error is None:
+                                    first_error = e
             if first_error is not None:
                 raise first_error
             self._emit("finished", stopped=self._stop.is_set())
@@ -142,18 +152,19 @@ class UploadEngine:
         except Exception as e:  # noqa: BLE001
             self._emit("error", message=f"{type(e).__name__}: {e}")
 
-    def _prepare(self, keys):
+    def _prepare(self, keys, retry_failed_first=None):
         marks = ",".join("?" * len(keys))
+        status_clause = "status IN ('new','uploaded')" if retry_failed_first is False else "status!='done'"
         row = self.db.query(
             f"SELECT COUNT(*) n, COALESCE(SUM(size),0) b FROM files "
-            f"WHERE album_key IN ({marks}) AND status!='done'", keys)[0]
+            f"WHERE album_key IN ({marks}) AND {status_clause}", keys)[0]
         self.stats = Stats(row["n"], row["b"])
 
-    def _do_album(self, key, pool):
+    def _do_album(self, key, pool, status=None):
         if self._stop.is_set():
             return
         title = self.db.query("SELECT title FROM albums WHERE key=?", (key,))[0]["title"]
-        pending = self.db.pending_files(key)
+        pending = self.db.pending_files(key, status)
         if not pending:
             return
         self._emit("album", title=title)
