@@ -14,6 +14,7 @@ TOKEN_MAX_AGE = 20 * 3600  # upload tokens expire after ~1 day
 FAILURE_WINDOW = 10
 FAILURE_LIMIT = 5
 FAILURE_COOLDOWN_SECONDS = 60
+FINISHED_LINGER = 2  # seconds a completed file stays in the progress list
 
 
 class Stats:
@@ -56,6 +57,7 @@ class FileProgress:
     def __init__(self, path, size, album=""):
         self.path, self.size, self.done = path, size, 0
         self.album = album
+        self.finished = 0
         self.start = time.time()
         self._samples = deque([(self.start, 0)])
 
@@ -96,7 +98,12 @@ class UploadEngine:
         self._cooldown_until = 0.0
 
     def file_progress(self):
+        now = time.time()
         with self._files_lock:
+            # finished files linger briefly so fast (small) uploads are visible
+            for p in [p for p, fp in self._file_progress.items()
+                      if fp.finished and now - fp.finished > FINISHED_LINGER]:
+                del self._file_progress[p]
             return list(self._file_progress.values())
 
     @property
@@ -283,8 +290,7 @@ class UploadEngine:
             self._emit("log", message=f"Upload failed for {path}: {type(e).__name__}: {e}")
             return None
         finally:
-            with self._files_lock:
-                self._file_progress.pop(path, None)
+            fp.finished = time.time()
         self.db.mark(path, "uploaded", token=token)
         return token
 

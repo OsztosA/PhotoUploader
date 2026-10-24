@@ -140,7 +140,8 @@ class App(tk.Tk):
         self.stat_lbl.pack(anchor="w", padx=8)
         self.threads_frame = ttk.Frame(status)
         self.threads_frame.pack(fill="x", padx=8, pady=(0, 4))
-        self.thread_rows = {}
+        self.thread_rows = []
+        self.slot_of = {}
         ttk.Style().configure("Small.Horizontal.TProgressbar", thickness=6)
         self.small_font = ("TkDefaultFont", 7)
 
@@ -394,30 +395,50 @@ class App(tk.Tk):
                 f"{fmt_size(s.bytes_done)} / {fmt_size(s.total_bytes)} | "
                 f"{fmt_size(s.speed())}/s | ETA {fmt_time(s.eta())} | elapsed {fmt_time(time.time() - s.start)}"))
             self._update_thread_rows(self.engine.file_progress())
-        elif self.thread_rows:
+        else:
             self._update_thread_rows([])
         if refresh:
             self.refresh_albums()
         self.after(500, self._tick)
 
     def _update_thread_rows(self, files):
-        current = {fp.path: fp for fp in files}
-        for path in [p for p in self.thread_rows if p not in current]:
-            self.thread_rows.pop(path)[0].destroy()
-        for path, fp in current.items():
-            if path not in self.thread_rows:
+        # fixed number of slots (2 x parallel uploads) so the window doesn't resize
+        count = 2 * (self.engine.workers if self.engine else self.workers.get())
+        if len(self.thread_rows) != count:
+            for slot in self.thread_rows:
+                slot[0].destroy()
+            self.thread_rows = []
+            self.slot_of = {}
+            for _ in range(count):
                 row = ttk.Frame(self.threads_frame)
                 row.pack(fill="x")
-                lbl = ttk.Label(row, text=f"[{fp.album}] {os.path.basename(path)}", font=self.small_font)
+                lbl = ttk.Label(row, text=" ", font=self.small_font)
                 lbl.pack(side="left")
                 spd = ttk.Label(row, text="", font=self.small_font, width=12, anchor="e")
                 spd.pack(side="right")
                 bar = ttk.Progressbar(row, maximum=100, style="Small.Horizontal.TProgressbar", length=200)
                 bar.pack(side="right", padx=6)
-                self.thread_rows[path] = (row, bar, spd)
-            _row, bar, spd = self.thread_rows[path]
-            bar["value"] = 100 * fp.done / fp.size if fp.size else 0
-            spd.config(text=f"{fmt_size(fp.speed())}/s")
+                self.thread_rows.append((row, lbl, bar, spd))
+        current = {fp.path: fp for fp in files}
+        self.slot_of = {p: i for p, i in self.slot_of.items() if p in current}
+        used = set(self.slot_of.values())
+        free = (i for i in range(count) if i not in used)
+        for path in current:
+            if path not in self.slot_of:
+                i = next(free, None)
+                if i is not None:
+                    self.slot_of[path] = i
+        by_slot = {i: current[p] for p, i in self.slot_of.items()}
+        for i, (_row, lbl, bar, spd) in enumerate(self.thread_rows):
+            fp = by_slot.get(i)
+            if fp is None:
+                lbl.config(text=" ")
+                bar["value"] = 0
+                spd.config(text="")
+            else:
+                lbl.config(text=f"[{fp.album}] {os.path.basename(fp.path)}")
+                bar["value"] = 100 * fp.done / fp.size if fp.size else 0
+                spd.config(text=f"{fmt_size(fp.speed())}/s")
 
     def _finished(self):
         self.start_btn.config(state="normal")
