@@ -350,7 +350,13 @@ class App(tk.Tk):
         if self.engine and self.engine.active and self.engine.stats:
             s = self.engine.stats
             self.bar["value"] = 100 * s.bytes_done / s.total_bytes if s.total_bytes else 100
-            state = "PAUSED" if not self.engine._running.is_set() else "Uploading"
+            cooldown = self.engine.cooldown_remaining
+            if not self.engine._running.is_set():
+                state = "PAUSED"
+            elif cooldown > 0:
+                state = f"Cooling down ({max(1, int(cooldown))}s)"
+            else:
+                state = "Uploading"
             self.stat_lbl.config(text=(
                 f"{state}: {s.files_done}/{s.total_files} files ({s.files_failed} failed) | "
                 f"{fmt_size(s.bytes_done)} / {fmt_size(s.total_bytes)} | "

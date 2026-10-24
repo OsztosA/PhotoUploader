@@ -3,6 +3,7 @@ from PIL import Image
 from photouploader.db import Database
 from photouploader.scanner import scan_folder
 from photouploader.engine import ApiError, UploadEngine
+from photouploader.api import PhotosApi
 
 
 class FakeApi:
@@ -107,6 +108,62 @@ def test_batch_create_failure_is_logged():
         contents = log.read()
     assert "Batch create failed" in contents
     assert "album rejected item" in contents
+
+
+def test_batch_create_parses_per_item_results():
+    class Response:
+        def json(self):
+            return {"newMediaItemResults": [
+                {
+                    "uploadToken": "failed-token",
+                    "status": {"code": 3, "message": "invalid media"},
+                },
+                {
+                    "uploadToken": "successful-token",
+                    "mediaItem": {"id": "media-id"},
+                },
+            ]}
+
+    api = PhotosApi(None)
+    api._request = lambda *args, **kwargs: Response()
+    assert api.batch_create("album-id", [
+        ("successful-token", "photo.jpg"),
+        ("failed-token", "broken.jpg"),
+    ]) == {
+        "failed-token": (False, "invalid media"),
+        "successful-token": (True, "media-id"),
+    }
+
+
+def test_high_failure_rate_triggers_cooldown():
+    import photouploader.engine as engine_module
+
+    previous_cooldown = engine_module.FAILURE_COOLDOWN_SECONDS
+    engine_module.FAILURE_COOLDOWN_SECONDS = 0.05
+    try:
+        d = tempfile.mkdtemp()
+        db = Database(os.path.join(d, "t.db"))
+        events = []
+        eng = UploadEngine(db, FakeApi(), events.append)
+        eng._running.set()
+        for _ in range(engine_module.FAILURE_LIMIT - 1):
+            eng._record_file_result(False)
+        assert eng.cooldown_remaining == 0
+        eng._record_file_result(False)
+
+        assert eng.cooldown_remaining > 0
+        assert any("pausing for 0.05 seconds" in e.get("message", "") for e in events), events
+        start = time.monotonic()
+        assert eng._wait_if_paused()
+        assert time.monotonic() - start >= 0.04
+        assert eng.cooldown_remaining == 0
+
+        eng._failure_history.clear()
+        for succeeded in (False, True, False, True, False, True, False, True, True, True):
+            eng._record_file_result(succeeded)
+        assert eng.cooldown_remaining == 0
+    finally:
+        engine_module.FAILURE_COOLDOWN_SECONDS = previous_cooldown
 
 
 def test_batch_create_success_is_logged():
@@ -219,6 +276,8 @@ def test_albums_share_upload_workers():
 test_flow()
 test_upload_failure_is_logged()
 test_batch_create_failure_is_logged()
+test_batch_create_parses_per_item_results()
+test_high_failure_rate_triggers_cooldown()
 test_batch_create_success_is_logged()
 test_resume_retries_failed_first_or_skips_them()
 test_albums_share_upload_workers()

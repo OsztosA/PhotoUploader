@@ -35,7 +35,10 @@ shown in the bottom-right panel and saved across sessions to `data\app.log`.
 Google Photos two-step upload: (1) POST raw bytes to `/v1/uploads` (parallel workers) -> upload token;
 (2) `mediaItems:batchCreate` with `albumId`, 50 items per call. Albums are created by the app via the API
 (required for the app to add to / share them). Upload tokens are stored, so an interrupted batch is
-finished without re-uploading (tokens older than 20 h are re-uploaded).
+finished without re-uploading (tokens older than 20 h are re-uploaded). `batchCreate` reports each
+item separately, so a successful request can contain item failures; failed items are recorded and
+re-uploaded on the next run. If at least 5 of the latest 10 file attempts fail, uploads automatically
+pause for 60 seconds before continuing.
 
 ## Sharing
 New albums get a share link via `albums.share` (toggle in the GUI). The API cannot invite people by e-mail,

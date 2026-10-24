@@ -11,6 +11,9 @@ from datetime import datetime
 from .api import ApiError, BATCH_LIMIT
 
 TOKEN_MAX_AGE = 20 * 3600  # upload tokens expire after ~1 day
+FAILURE_WINDOW = 10
+FAILURE_LIMIT = 5
+FAILURE_COOLDOWN_SECONDS = 60
 
 
 class Stats:
@@ -88,6 +91,9 @@ class UploadEngine:
         self._share_lock = threading.Lock()
         self._log_lock = threading.Lock()
         self._commit_lock = threading.Lock()
+        self._failure_lock = threading.Lock()
+        self._failure_history = deque(maxlen=FAILURE_WINDOW)
+        self._cooldown_until = 0.0
 
     def file_progress(self):
         with self._files_lock:
@@ -100,6 +106,9 @@ class UploadEngine:
     def start(self, album_keys, retry_failed_first=None):
         self._stop.clear()
         self._running.set()
+        with self._failure_lock:
+            self._failure_history.clear()
+            self._cooldown_until = 0.0
         self._thread = threading.Thread(
             target=self._run, args=(list(album_keys), retry_failed_first), daemon=True)
         self._thread.start()
@@ -132,8 +141,37 @@ class UploadEngine:
         self.on_event({"kind": kind, **kw})
 
     def _wait_if_paused(self):
-        self._running.wait()
-        return not self._stop.is_set()
+        while not self._stop.is_set():
+            if not self._running.wait(timeout=0.25):
+                continue
+            remaining = self.cooldown_remaining
+            if remaining <= 0:
+                return True
+            self._stop.wait(min(remaining, 0.25))
+        return False
+
+    @property
+    def cooldown_remaining(self):
+        with self._failure_lock:
+            return max(0.0, self._cooldown_until - time.monotonic())
+
+    def _record_file_result(self, succeeded):
+        with self._failure_lock:
+            self._failure_history.append(not succeeded)
+            if len(self._failure_history) < FAILURE_LIMIT:
+                return
+            if sum(self._failure_history) < FAILURE_LIMIT:
+                return
+            now = time.monotonic()
+            if self._cooldown_until > now:
+                return
+            self._cooldown_until = now + FAILURE_COOLDOWN_SECONDS
+        self._emit(
+            "info",
+            message=f"Upload failure rate is high "
+                    f"({FAILURE_LIMIT} or more of the last {FAILURE_WINDOW} files failed); "
+                    f"pausing for {FAILURE_COOLDOWN_SECONDS} seconds.",
+        )
 
     def _run(self, keys, retry_failed_first=None):
         try:
@@ -241,6 +279,7 @@ class UploadEngine:
                 self._stop.set()
             self.db.mark(path, "failed", error=str(e))
             self.stats.add_files_failed()
+            self._record_file_result(False)
             self._emit("log", message=f"Upload failed for {path}: {type(e).__name__}: {e}")
             return None
         finally:
@@ -264,16 +303,19 @@ class UploadEngine:
             self._emit("log", message=f"Batch create failed for {len(files)} file(s): {e}")
             for f in files:  # keep the upload token, retried on next run
                 self.db.mark(f["path"], "uploaded", token=f["upload_token"], error=str(e))
+                self._record_file_result(False)
             return
         committed = 0
         for token, f in by_token.items():
             ok, info = results.get(token, (False, "no result"))
             if ok:
                 committed += 1
+                self._record_file_result(True)
                 self._log_uploaded_file(f, album_title, album_id, info)
                 self.db.mark(f["path"], "done", media_id=info)
                 self.stats.add_files_done()
             else:
+                self._record_file_result(False)
                 self.db.mark(f["path"], "failed", error=info)  # token unusable -> re-upload next time
                 self.stats.add_files_failed()
                 self._emit("log", message=f"Adding {f['path']} to album failed: {info}")
