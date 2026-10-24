@@ -57,19 +57,24 @@ def file_hash(path):
     return h.hexdigest()
 
 
-def mark_duplicates(db, cancelled=lambda: False):
+def mark_duplicates(db, cancelled=lambda: False, progress=None):
     """Files with equal size AND equal SHA-256 are duplicates; only the first copy is kept.
 
     Already uploaded files are preferred as the original. Returns the number of duplicates marked.
     """
     sizes = [r["size"] for r in db.query("SELECT size FROM files GROUP BY size HAVING COUNT(*)>1")]
-    marked = 0
+    marked = checked = 0
+    total = db.query("SELECT COUNT(*) n FROM files WHERE size IN "
+                     "(SELECT size FROM files GROUP BY size HAVING COUNT(*)>1)")[0]["n"]
     for size in sizes:
         group = db.query("SELECT path, status, hash FROM files WHERE size=? ORDER BY path", (size,))
         by_hash = {}
         for r in group:
             if cancelled():
                 return marked
+            checked += 1
+            if progress and (checked % 10 == 0 or checked == total):
+                progress("hashing", checked, total)
             h = r["hash"]
             if not h:
                 try:
@@ -97,7 +102,7 @@ def scan_folder(folder, db, progress=None, cancelled=lambda: False, rescan=False
     With rescan=True, every file of an album that still has unprocessed files is re-evaluated
     (album assignment, duplicates) and DB entries of vanished files in those albums are dropped.
     """
-    batch, count = [], 0
+    batch, count, checked = [], 0, 0
     reopen = db.unprocessed_keys() if rescan else set()
     seen = set()
     for root, dirs, names in os.walk(folder):
@@ -118,6 +123,9 @@ def scan_folder(folder, db, progress=None, cancelled=lambda: False, rescan=False
             except OSError:
                 continue
             seen.add(path)
+            checked += 1
+            if progress and checked % 25 == 0:
+                progress("scanning", checked, None)
             known = db.query("SELECT size, mtime, album_key FROM files WHERE path=?", (path,))
             if known and known[0]["size"] == st.st_size and known[0]["mtime"] == st.st_mtime \
                     and known[0]["album_key"] not in reopen:
@@ -130,15 +138,13 @@ def scan_folder(folder, db, progress=None, cancelled=lambda: False, rescan=False
             if len(batch) >= 200:
                 db.upsert_scanned(batch)
                 batch = []
-            if progress and count % 25 == 0:
-                progress(count)
     db.upsert_scanned(batch)
     if rescan:
         for key in reopen:
             for r in db.query("SELECT path FROM files WHERE album_key=? AND status!='done'", (key,)):
                 if r["path"] not in seen and not os.path.exists(r["path"]):
                     db.delete_file(r["path"])
-    mark_duplicates(db, cancelled)
+    mark_duplicates(db, cancelled, progress)
     if progress:
-        progress(count)
+        progress("done", checked, checked)
     return count

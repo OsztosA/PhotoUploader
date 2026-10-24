@@ -56,6 +56,7 @@ class App(tk.Tk):
         self.events = queue.Queue()
         self.engine = None
         self.scanning = False
+        self.rescanning = False
         self.log_path = os.path.join(DATA_DIR, "app.log")
         self.settings_path = os.path.join(DATA_DIR, "settings.json")
         self._build()
@@ -79,7 +80,8 @@ class App(tk.Tk):
 
         fol = ttk.LabelFrame(self, text="2. Folder (scanned recursively)")
         fol.pack(fill="x", **pad)
-        self.folder = tk.StringVar()
+        self.folder = tk.StringVar(value=self._load_settings().get("folder", ""))
+        self.folder.trace_add("write", lambda *_: self._save_setting("folder", lambda: self.folder.get().strip()))
         ttk.Entry(fol, textvariable=self.folder).pack(side="left", fill="x", expand=True, padx=8, pady=6)
         ttk.Button(fol, text="Browse...", command=self.browse).pack(side="left")
         self.scan_btn = ttk.Button(fol, text="Scan", command=self.scan)
@@ -106,7 +108,8 @@ class App(tk.Tk):
         ctl = ttk.LabelFrame(self, text="4. Upload")
         ctl.pack(fill="x", **pad)
         ttk.Label(ctl, text="Parallel uploads:").pack(side="left", padx=(8, 2))
-        self.workers = tk.IntVar(value=4)
+        self.workers = tk.IntVar(value=self._load_settings().get("workers", 4))
+        self.workers.trace_add("write", lambda *_: self._save_setting("workers", self.workers.get))
         ttk.Spinbox(ctl, from_=1, to=16, width=4, textvariable=self.workers).pack(side="left")
         ttk.Label(ctl, text="Max speed (Mbps, 0 = unlimited):").pack(side="left", padx=(12, 2))
         self.max_mbps = tk.StringVar(value=self._load_settings().get("max_mbps", "0"))
@@ -162,8 +165,20 @@ class App(tk.Tk):
         self.api.throttle.mbps = value
         settings = self._load_settings()
         settings["max_mbps"] = self.max_mbps.get().strip()
+        self._write_settings(settings)
+
+    def _write_settings(self, settings):
         with open(self.settings_path, "w", encoding="utf-8") as f:
             json.dump(settings, f, indent=2)
+
+    def _save_setting(self, key, getter):
+        try:
+            value = getter()
+        except tk.TclError:
+            return  # field holds invalid text while typing
+        settings = self._load_settings()
+        settings[key] = value
+        self._write_settings(settings)
 
     def log_msg(self, msg):
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -223,13 +238,14 @@ class App(tk.Tk):
         if not os.path.isdir(folder) or self.scanning:
             return
         self.scanning = True
+        self.rescanning = rescan
         self.scan_btn.config(state="disabled")
         self.rescan_btn.config(state="disabled")
         self.log_msg(f"{'Rescanning unprocessed albums in' if rescan else 'Scanning'} {folder} ...")
 
         def work():
-            n = scan_folder(folder, self.db, rescan=rescan,
-                            progress=lambda c: self.events.put({"kind": "scanning", "count": c}))
+            n = scan_folder(folder, self.db, rescan=rescan, progress=lambda stage, done, total: self.events.put(
+                {"kind": "scanning", "stage": stage, "done": done, "total": total}))
             self.events.put({"kind": "scanned", "count": n})
         threading.Thread(target=work, daemon=True).start()
 
@@ -326,9 +342,19 @@ class App(tk.Tk):
                 elif k == "auth":
                     self.update_auth_state()
                 elif k == "scanning":
-                    self.stat_lbl.config(text=f"Scanning... {ev['count']} files")
+                    label = "Rescanning" if self.rescanning else "Scanning"
+                    if ev["stage"] == "hashing":
+                        self.stat_lbl.config(text=f"{label}: hashing {ev['done']}/{ev['total']} files for duplicates")
+                        self.bar.config(mode="determinate")
+                        self.bar["value"] = 100 * ev["done"] / ev["total"] if ev["total"] else 100
+                    else:
+                        self.stat_lbl.config(text=f"{label}: {ev['done']} files checked")
+                        self.bar.config(mode="indeterminate")
+                        self.bar.step(5)
                 elif k == "scanned":
                     self.scanning = False
+                    self.bar.config(mode="determinate")
+                    self.bar["value"] = 0
                     self.scan_btn.config(state="normal")
                     self.rescan_btn.config(state="normal")
                     dups = self.db.query("SELECT COUNT(*) n FROM files WHERE status='duplicate'")[0]["n"]
