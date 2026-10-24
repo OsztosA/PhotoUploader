@@ -195,7 +195,10 @@ class UploadEngine:
                     for mode in modes:
                         if self._stop.is_set():
                             break
-                        futures = [album_pool.submit(self._do_album, key, upload_pool, mode) for key in keys]
+                        futures = {
+                            album_pool.submit(self._do_album, key, upload_pool, mode): key
+                            for key in keys
+                        }
                         for future in as_completed(futures):
                             try:
                                 future.result()
@@ -203,6 +206,8 @@ class UploadEngine:
                                 self._stop.set()
                                 if first_error is None:
                                     first_error = e
+                            finally:
+                                self._emit("album_done", key=futures[future])
             if first_error is not None:
                 raise first_error
             self._emit("finished", stopped=self._stop.is_set())
@@ -226,7 +231,7 @@ class UploadEngine:
         pending = self.db.pending_files(key, status)
         if not pending:
             return
-        self._emit("album", title=title)
+        self._emit("album", key=key, title=title)
         album = self.db.query("SELECT album_id, share_url FROM albums WHERE key=?", (key,))[0]
         album_id = album["album_id"]
         if not album_id:
@@ -260,7 +265,7 @@ class UploadEngine:
                 if token:
                     ready.append({**dict(f), "upload_token": token})
             if ready:
-                self._commit(album_id, title, ready)
+                self._commit(album_id, title, ready, key=key)
             self._emit("progress")
             if self._stop.is_set():
                 return
@@ -294,9 +299,15 @@ class UploadEngine:
         self.db.mark(path, "uploaded", token=token)
         return token
 
-    def _commit(self, album_id, album_title, files):
+    def _commit(self, album_id, album_title, files, key=None):
         with self._commit_lock:
-            self._commit_locked(album_id, album_title, files)
+            if key is not None:
+                self._emit("commit_start", key=key)
+            try:
+                self._commit_locked(album_id, album_title, files)
+            finally:
+                if key is not None:
+                    self._emit("commit_done", key=key)
 
     def _commit_locked(self, album_id, album_title, files):
         by_token = {f["upload_token"]: f for f in files}

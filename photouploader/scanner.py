@@ -100,7 +100,8 @@ def scan_folder(folder, db, progress=None, cancelled=lambda: False, rescan=False
     """Walk folder recursively and record files in the DB. Returns count of new/changed files.
 
     With rescan=True, every file of an album that still has unprocessed files is re-evaluated
-    (album assignment, duplicates) and DB entries of vanished files in those albums are dropped.
+    (album assignment, duplicates) and DB entries of vanished files that are still pending (new/uploaded) are dropped;
+    entries of uploaded (done), failed and duplicate files are never dropped.
     """
     batch, count, checked = [], 0, 0
     reopen = db.unprocessed_keys() if rescan else set()
@@ -141,7 +142,7 @@ def scan_folder(folder, db, progress=None, cancelled=lambda: False, rescan=False
     db.upsert_scanned(batch)
     if rescan:
         for key in reopen:
-            for r in db.query("SELECT path FROM files WHERE album_key=? AND status!='done'", (key,)):
+            for r in db.query("SELECT path FROM files WHERE album_key=? AND status IN ('new','uploaded')", (key,)):
                 if r["path"] not in seen and not os.path.exists(r["path"]):
                     db.delete_file(r["path"])
     mark_duplicates(db, cancelled, progress)

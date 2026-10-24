@@ -55,6 +55,8 @@ class App(tk.Tk):
         self.api = PhotosApi(self.auth)
         self.events = queue.Queue()
         self.engine = None
+        self.uploading_albums = set()
+        self.committing_albums = set()
         self.scanning = False
         self.rescanning = False
         self.log_path = os.path.join(DATA_DIR, "app.log")
@@ -93,6 +95,8 @@ class App(tk.Tk):
         alb.pack(fill="both", expand=True, **pad)
         cols = ("files", "done", "failed", "size", "left", "shared")
         self.tree = ttk.Treeview(alb, columns=cols, show="tree headings", selectmode="extended", height=8)
+        self.tree.tag_configure("uploading", background="#fff2cc", foreground="#7a4b00")
+        self.tree.tag_configure("committing", background="#d9eaf7", foreground="#164a6e")
         self.tree.heading("#0", text="Album")
         self.tree.column("#0", width=160)
         for c, t, w in (("files", "Files", 70), ("done", "Uploaded", 80), ("failed", "Failed", 70),
@@ -256,7 +260,9 @@ class App(tk.Tk):
         for r in self.db.album_summary():
             done, failed = r["done"] or 0, r["failed"] or 0
             self.tree.insert("", "end", iid=r["key"], text=r["title"], values=(
-                r["total"], done, failed, fmt_size(r["bytes"]), r["total"] - done, r["share_url"] or ""))
+                r["total"], done, failed, fmt_size(r["bytes"]), r["total"] - done, r["share_url"] or ""),
+                tags=("committing",) if r["key"] in self.committing_albums else
+                     ("uploading",) if r["key"] in self.uploading_albums else ())
         keep = [k for k in sel if self.tree.exists(k)]
         if keep:
             self.tree.selection_set(keep)
@@ -296,7 +302,11 @@ class App(tk.Tk):
         rows.sort(key=lambda r: (not bool(r["done"]), r["key"]))
         keys = [r["key"] for r in rows]
         if not keys:
-            messagebox.showinfo("Nothing to do", "No pending files. Browse a folder and scan first.")
+            if selected:
+                messagebox.showinfo("Nothing to do", f"The {len(selected)} selected album(s) have no pending files. "
+                                    "Deselect them (Ctrl+click) to upload all albums.")
+            else:
+                messagebox.showinfo("Nothing to do", "No pending files. Browse a folder and scan first.")
             return
         marks = ",".join("?" * len(keys))
         failed = self.db.query(
@@ -313,7 +323,7 @@ class App(tk.Tk):
         self.start_btn.config(state="disabled")
         self.pause_btn.config(state="normal", text="Pause")
         self.stop_btn.config(state="normal")
-        self.log_msg(f"Upload started: {len(keys)} album(s).")
+        self.log_msg(f"Upload started: {len(keys)} album(s)" + (" (selected only)." if selected else "."))
 
     def toggle_pause(self):
         if not self.engine or not self.engine.active:
@@ -363,7 +373,18 @@ class App(tk.Tk):
                     self.stat_lbl.config(text="Idle")
                     refresh = True
                 elif k == "album":
+                    self.uploading_albums.add(ev["key"])
                     self.log_msg(f"Album: {ev['title']}")
+                    refresh = True
+                elif k == "album_done":
+                    self.uploading_albums.discard(ev["key"])
+                    refresh = True
+                elif k == "commit_start":
+                    self.committing_albums.add(ev["key"])
+                    refresh = True
+                elif k == "commit_done":
+                    self.committing_albums.discard(ev["key"])
+                    refresh = True
                 elif k == "shared":
                     self.log_msg(f"Share link created for {ev['title']}")
                     refresh = True
@@ -441,6 +462,8 @@ class App(tk.Tk):
                 spd.config(text=f"{fmt_size(fp.speed())}/s")
 
     def _finished(self):
+        self.uploading_albums.clear()
+        self.committing_albums.clear()
         self.start_btn.config(state="normal")
         self.pause_btn.config(state="disabled", text="Pause")
         self.stop_btn.config(state="disabled")
