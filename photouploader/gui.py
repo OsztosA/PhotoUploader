@@ -133,8 +133,6 @@ class App(tk.Tk):
         self.bar.pack(fill="x", padx=8, pady=6)
         self.stat_lbl = ttk.Label(status, text="Idle")
         self.stat_lbl.pack(anchor="w", padx=8)
-        self.album_lbl = ttk.Label(status, text="")
-        self.album_lbl.pack(anchor="w", padx=8, pady=(0, 4))
         self.threads_frame = ttk.Frame(status)
         self.threads_frame.pack(fill="x", padx=8, pady=(0, 4))
         self.thread_rows = {}
@@ -345,7 +343,6 @@ class App(tk.Tk):
                 f"{state}: {s.files_done}/{s.total_files} files ({s.files_failed} failed) | "
                 f"{fmt_size(s.bytes_done)} / {fmt_size(s.total_bytes)} | "
                 f"{fmt_size(s.speed())}/s | ETA {fmt_time(s.eta())} | elapsed {fmt_time(time.time() - s.start)}"))
-            self.album_lbl.config(text=f"Current album: {self.engine.current_album}")
             self._update_thread_rows(self.engine.file_progress())
         elif self.thread_rows:
             self._update_thread_rows([])
@@ -361,7 +358,7 @@ class App(tk.Tk):
             if path not in self.thread_rows:
                 row = ttk.Frame(self.threads_frame)
                 row.pack(fill="x")
-                lbl = ttk.Label(row, text=os.path.basename(path), font=self.small_font)
+                lbl = ttk.Label(row, text=f"[{fp.album}] {os.path.basename(path)}", font=self.small_font)
                 lbl.pack(side="left")
                 spd = ttk.Label(row, text="", font=self.small_font, width=12, anchor="e")
                 spd.pack(side="right")
@@ -376,7 +373,6 @@ class App(tk.Tk):
         self.start_btn.config(state="normal")
         self.pause_btn.config(state="disabled", text="Pause")
         self.stop_btn.config(state="disabled")
-        self.album_lbl.config(text="")
 
     def _close(self):
         if self.engine and self.engine.active:

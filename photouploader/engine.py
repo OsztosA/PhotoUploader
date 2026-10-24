@@ -50,8 +50,9 @@ class Stats:
 
 
 class FileProgress:
-    def __init__(self, path, size):
+    def __init__(self, path, size, album=""):
         self.path, self.size, self.done = path, size, 0
+        self.album = album
         self.start = time.time()
         self._samples = deque([(self.start, 0)])
 
@@ -80,7 +81,6 @@ class UploadEngine:
         self._stop = threading.Event()
         self._thread = None
         self.stats = None
-        self.current_album = ""
         self._files_lock = threading.Lock()
         self._file_progress = {}
         self._share_lock = threading.Lock()
@@ -156,7 +156,6 @@ class UploadEngine:
         pending = self.db.pending_files(key)
         if not pending:
             return
-        self.current_album = title
         self._emit("album", title=title)
         album = self.db.query("SELECT album_id, share_url FROM albums WHERE key=?", (key,))[0]
         album_id = album["album_id"]
@@ -187,7 +186,7 @@ class UploadEngine:
                     self.stats.add_bytes(f["size"])
                 else:
                     todo.append(f)
-            for f, token in zip(todo, pool.map(self._upload_one, todo)):
+            for f, token in zip(todo, pool.map(lambda f: self._upload_one(f, title), todo)):
                 if token:
                     ready.append({**dict(f), "upload_token": token})
             if ready:
@@ -196,11 +195,11 @@ class UploadEngine:
             if self._stop.is_set():
                 return
 
-    def _upload_one(self, f):
+    def _upload_one(self, f, album=""):
         if not self._wait_if_paused():
             return None
         path = f["path"]
-        fp = FileProgress(path, f["size"])
+        fp = FileProgress(path, f["size"], album)
 
         def on_bytes(n):
             fp.add(n)
