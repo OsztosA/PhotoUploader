@@ -206,7 +206,7 @@ class UploadEngine:
 
     def _prepare(self, keys, retry_failed_first=None):
         marks = ",".join("?" * len(keys))
-        status_clause = "status IN ('new','uploaded')" if retry_failed_first is False else "status!='done'"
+        status_clause = "status IN ('new','uploaded')" if retry_failed_first is False else "status NOT IN ('done','duplicate')"
         row = self.db.query(
             f"SELECT COUNT(*) n, COALESCE(SUM(size),0) b FROM files "
             f"WHERE album_key IN ({marks}) AND {status_clause}", keys)[0]

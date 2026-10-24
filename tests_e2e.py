@@ -26,7 +26,7 @@ def test_flow():
     d = tempfile.mkdtemp()
     os.makedirs(os.path.join(d, "sub"))
     for i in range(120):
-        im = Image.new("RGB", (4, 4))
+        im = Image.new("RGB", (4, 4), (i, i, i))
         ex = Image.Exif()
         ex[306] = "2018:01:05 10:00:00" if i % 2 else "2019:03:09 10:00:00"
         im.save(os.path.join(d, "sub" if i % 3 else "", f"{i}.jpg"), exif=ex)

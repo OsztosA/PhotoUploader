@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS files (
     mtime REAL NOT NULL,
     taken TEXT NOT NULL,             -- ISO datetime from EXIF (or file mtime)
     album_key TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'new',   -- new | uploaded | done | failed
+    status TEXT NOT NULL DEFAULT 'new',   -- new | uploaded | done | failed | duplicate
     upload_token TEXT,
     media_item_id TEXT,
     error TEXT,
@@ -34,6 +34,10 @@ class Database:
         self._c.row_factory = sqlite3.Row
         with self._lock:
             self._c.executescript(SCHEMA)
+            cols = {r["name"] for r in self._c.execute("PRAGMA table_info(files)")}
+            if "hash" not in cols:
+                self._c.execute("ALTER TABLE files ADD COLUMN hash TEXT")
+            self._c.execute("CREATE INDEX IF NOT EXISTS idx_files_size ON files(size)")
             self._c.commit()
 
     def execute(self, sql, params=()):
@@ -56,12 +60,27 @@ class Database:
                     self._c.execute(
                         "INSERT INTO files(path,size,mtime,taken,album_key) VALUES (?,?,?,?,?)",
                         (path, size, mtime, taken, key))
+                elif old["size"] == size and old["mtime"] == mtime:
+                    # rescan of an unchanged file: keep upload state, re-evaluate duplicates
+                    self._c.execute(
+                        "UPDATE files SET taken=?,album_key=?,"
+                        "status=CASE WHEN status='duplicate' THEN 'new' ELSE status END,"
+                        "error=CASE WHEN status='duplicate' THEN NULL ELSE error END WHERE path=?",
+                        (taken, key, path))
                 else:
                     self._c.execute(
-                        "UPDATE files SET size=?,mtime=?,taken=?,album_key=?,status='new',"
+                        "UPDATE files SET size=?,mtime=?,taken=?,album_key=?,status='new',hash=NULL,"
                         "upload_token=NULL,media_item_id=NULL,error=NULL WHERE path=?",
                         (size, mtime, taken, key, path))
             self._c.commit()
+
+    def unprocessed_keys(self):
+        """Albums that still have files which are neither done nor duplicates."""
+        return {r["album_key"] for r in self.query(
+            "SELECT DISTINCT album_key FROM files WHERE status NOT IN ('done','duplicate')")}
+
+    def delete_file(self, path):
+        self.execute("DELETE FROM files WHERE path=?", (path,))
 
     def album_summary(self):
         return self.query(
@@ -69,7 +88,7 @@ class Database:
             "SUM(f.status='done') done, SUM(f.status='failed') failed, "
             "COALESCE(SUM(f.size),0) bytes, "
             "COALESCE(SUM(CASE WHEN f.status!='done' THEN f.size END),0) pending_bytes "
-            "FROM albums a JOIN files f ON f.album_key=a.key GROUP BY a.key ORDER BY a.key")
+            "FROM albums a JOIN files f ON f.album_key=a.key AND f.status!='duplicate' GROUP BY a.key ORDER BY a.key")
 
     def set_album(self, key, album_id):
         self.execute("UPDATE albums SET album_id=? WHERE key=?", (album_id, key))

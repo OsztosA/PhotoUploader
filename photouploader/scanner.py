@@ -1,5 +1,6 @@
 """Recursive folder scan; groups images by EXIF capture month."""
 import calendar
+import hashlib
 import os
 import re
 from datetime import datetime
@@ -48,9 +49,57 @@ def exif_datetime(path):
     return dt if dt.year > 1970 else None
 
 
-def scan_folder(folder, db, progress=None, cancelled=lambda: False):
-    """Walk folder recursively and record files in the DB. Returns count of new/changed files."""
+def file_hash(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def mark_duplicates(db, cancelled=lambda: False):
+    """Files with equal size AND equal SHA-256 are duplicates; only the first copy is kept.
+
+    Already uploaded files are preferred as the original. Returns the number of duplicates marked.
+    """
+    sizes = [r["size"] for r in db.query("SELECT size FROM files GROUP BY size HAVING COUNT(*)>1")]
+    marked = 0
+    for size in sizes:
+        group = db.query("SELECT path, status, hash FROM files WHERE size=? ORDER BY path", (size,))
+        by_hash = {}
+        for r in group:
+            if cancelled():
+                return marked
+            h = r["hash"]
+            if not h:
+                try:
+                    h = file_hash(r["path"])
+                except OSError:
+                    continue
+                db.execute("UPDATE files SET hash=? WHERE path=?", (h, r["path"]))
+            by_hash.setdefault(h, []).append(r)
+        for items in by_hash.values():
+            if len(items) < 2:
+                continue
+            items.sort(key=lambda r: (r["status"] != "done", r["status"] == "duplicate"))
+            original = items[0]["path"]
+            for r in items[1:]:
+                if r["status"] in ("new", "uploaded", "failed", "duplicate"):
+                    db.execute("UPDATE files SET status='duplicate', upload_token=NULL, error=? WHERE path=?",
+                               (f"Duplicate of {original}", r["path"]))
+                    marked += 1
+    return marked
+
+
+def scan_folder(folder, db, progress=None, cancelled=lambda: False, rescan=False):
+    """Walk folder recursively and record files in the DB. Returns count of new/changed files.
+
+    With rescan=True, every file of an album that still has unprocessed files is re-evaluated
+    (album assignment, duplicates) and DB entries of vanished files in those albums are dropped.
+    """
     batch, count = [], 0
+    reopen = db.unprocessed_keys() if rescan else set()
+    seen = set()
     for root, dirs, names in os.walk(folder):
         dirs[:] = [d for d in dirs if not d.startswith(".")]  # skip hidden folders
         for name in names:
@@ -68,8 +117,10 @@ def scan_folder(folder, db, progress=None, cancelled=lambda: False):
                 st = os.stat(path)
             except OSError:
                 continue
-            known = db.query("SELECT size, mtime FROM files WHERE path=?", (path,))
-            if known and known[0]["size"] == st.st_size and known[0]["mtime"] == st.st_mtime:
+            seen.add(path)
+            known = db.query("SELECT size, mtime, album_key FROM files WHERE path=?", (path,))
+            if known and known[0]["size"] == st.st_size and known[0]["mtime"] == st.st_mtime \
+                    and known[0]["album_key"] not in reopen:
                 continue  # unchanged: keep recorded upload state
             taken = (filename_datetime(name) if is_video else exif_datetime(path)) \
                 or datetime.fromtimestamp(st.st_mtime)
@@ -82,6 +133,12 @@ def scan_folder(folder, db, progress=None, cancelled=lambda: False):
             if progress and count % 25 == 0:
                 progress(count)
     db.upsert_scanned(batch)
+    if rescan:
+        for key in reopen:
+            for r in db.query("SELECT path FROM files WHERE album_key=? AND status!='done'", (key,)):
+                if r["path"] not in seen and not os.path.exists(r["path"]):
+                    db.delete_file(r["path"])
+    mark_duplicates(db, cancelled)
     if progress:
         progress(count)
     return count

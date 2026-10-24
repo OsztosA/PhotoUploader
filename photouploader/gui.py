@@ -84,6 +84,8 @@ class App(tk.Tk):
         ttk.Button(fol, text="Browse...", command=self.browse).pack(side="left")
         self.scan_btn = ttk.Button(fol, text="Scan", command=self.scan)
         self.scan_btn.pack(side="left", padx=8)
+        self.rescan_btn = ttk.Button(fol, text="Rescan unprocessed", command=lambda: self.scan(rescan=True))
+        self.rescan_btn.pack(side="left", padx=(0, 8))
 
         alb = ttk.LabelFrame(self, text="3. Albums (one per month, by EXIF date) - select albums to upload, none = all")
         alb.pack(fill="both", expand=True, **pad)
@@ -216,16 +218,18 @@ class App(tk.Tk):
             self.folder.set(d)
             self.scan()
 
-    def scan(self):
+    def scan(self, rescan=False):
         folder = self.folder.get().strip()
         if not os.path.isdir(folder) or self.scanning:
             return
         self.scanning = True
         self.scan_btn.config(state="disabled")
-        self.log_msg(f"Scanning {folder} ...")
+        self.rescan_btn.config(state="disabled")
+        self.log_msg(f"{'Rescanning unprocessed albums in' if rescan else 'Scanning'} {folder} ...")
 
         def work():
-            n = scan_folder(folder, self.db, progress=lambda c: self.events.put({"kind": "scanning", "count": c}))
+            n = scan_folder(folder, self.db, rescan=rescan,
+                            progress=lambda c: self.events.put({"kind": "scanning", "count": c}))
             self.events.put({"kind": "scanned", "count": n})
         threading.Thread(target=work, daemon=True).start()
 
@@ -326,7 +330,9 @@ class App(tk.Tk):
                 elif k == "scanned":
                     self.scanning = False
                     self.scan_btn.config(state="normal")
-                    self.log_msg(f"Scan finished: {ev['count']} new/changed files.")
+                    self.rescan_btn.config(state="normal")
+                    dups = self.db.query("SELECT COUNT(*) n FROM files WHERE status='duplicate'")[0]["n"]
+                    self.log_msg(f"Scan finished: {ev['count']} new/changed files, {dups} duplicates skipped.")
                     self.stat_lbl.config(text="Idle")
                     refresh = True
                 elif k == "album":
