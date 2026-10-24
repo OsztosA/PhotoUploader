@@ -83,6 +83,30 @@ def test_upload_failure_is_logged():
         e["kind"] == "log" and path in e["message"] and "network unavailable" in e["message"]
         for e in events
     ), events
+    with open(eng.error_log_path, encoding="utf-8") as log:
+        assert "Upload failed for" in log.read()
+
+
+def test_batch_create_failure_is_logged():
+    d = tempfile.mkdtemp()
+    path = os.path.join(d, "failed.jpg")
+    with open(path, "wb") as f:
+        f.write(b"photo")
+    db = Database(os.path.join(d, "t.db"))
+    db.upsert_scanned([(path, 5, time.time(), "2018-01-05", "2018-01", "2018. January")])
+
+    class FailingBatchApi(FakeApi):
+        def batch_create(self, album_id, items):
+            raise ApiError("album rejected item")
+
+    eng = UploadEngine(db, FailingBatchApi(), lambda _: None, share=False)
+    eng.start(["2018-01"])
+    eng._thread.join(10)
+    assert not eng.active
+    with open(eng.error_log_path, encoding="utf-8") as log:
+        contents = log.read()
+    assert "Batch create failed" in contents
+    assert "album rejected item" in contents
 
 
 def test_resume_retries_failed_first_or_skips_them():
@@ -170,6 +194,7 @@ def test_albums_share_upload_workers():
 
 test_flow()
 test_upload_failure_is_logged()
+test_batch_create_failure_is_logged()
 test_resume_retries_failed_first_or_skips_them()
 test_albums_share_upload_workers()
 

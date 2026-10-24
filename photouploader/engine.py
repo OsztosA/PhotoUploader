@@ -77,6 +77,8 @@ class UploadEngine:
         self.workers, self.share = workers, share
         self.upload_log_path = os.path.join(
             os.path.dirname(os.path.abspath(db.path)), "uploaded_files.csv")
+        self.error_log_path = os.path.join(
+            os.path.dirname(os.path.abspath(db.path)), "upload_errors.log")
         self._running = threading.Event()   # set = not paused
         self._stop = threading.Event()
         self._thread = None
@@ -115,6 +117,18 @@ class UploadEngine:
         self._running.set()
 
     def _emit(self, kind, **kw):
+        if kind in ("log", "error"):
+            message = str(kw.get("message", "")).replace("\r", "\\r").replace("\n", "\\n")
+            timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+            try:
+                with self._log_lock:
+                    with open(self.error_log_path, "a", encoding="utf-8") as log:
+                        log.write(f"{timestamp} ERROR {message}\n")
+            except OSError as e:
+                self.on_event({
+                    "kind": "log",
+                    "message": f"Could not write upload error log {self.error_log_path}: {e}",
+                })
         self.on_event({"kind": kind, **kw})
 
     def _wait_if_paused(self):

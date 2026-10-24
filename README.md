@@ -28,7 +28,8 @@ Browse a folder (scanned recursively) -> albums and file counts appear -> select
 it can be changed live while uploading and is remembered in `data\settings.json`.
 Each successfully added photo is also recorded in `data\uploaded_files.csv`, including its Google Photos
 media item ID and album ID, so the uploaded items can be identified for later removal.
-The detailed application log is shown in the bottom-right panel and saved across sessions to `data\app.log`.
+Upload errors are appended with timestamps to `data\upload_errors.log`. The detailed application log is
+shown in the bottom-right panel and saved across sessions to `data\app.log`.
 
 ## How it works
 Google Photos two-step upload: (1) POST raw bytes to `/v1/uploads` (parallel workers) -> upload token;
